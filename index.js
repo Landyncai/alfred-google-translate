@@ -14,8 +14,46 @@ var g_config = {
     voice: process.env.voice || 'remote',
     save: process.env.save_count || 20,
     domain: process.env.domain || 'https://translate.google.com',
-	agent: process.env.socks_proxy ? new SocksProxyAgent(process.env.socks_proxy) : undefined
+    agent: process.env.socks_proxy ? new SocksProxyAgent(process.env.socks_proxy) : undefined
 };
+
+
+// anki
+var fromTextGlobal = "";
+var toTextGlobal = "";
+var deckDate = acquireCurrentDate();
+// var deckName = "Default";
+var deckName = "vocabulary::" + deckDate;
+function invokeAnki(action, version, params={}) {
+    return new Promise((resolve, reject) => {
+        var XMLHttpRequest = require("xmlhttprequest").XMLHttpRequest;
+        const xhr = new XMLHttpRequest();
+        xhr.addEventListener('error', () => reject('failed to issue request'));
+        xhr.addEventListener('load', () => {
+            try {
+                const response = JSON.parse(xhr.responseText);
+                if (Object.getOwnPropertyNames(response).length != 2) {
+                    throw 'response has an unexpected number of fields';
+                }
+                if (!response.hasOwnProperty('error')) {
+                    throw 'response is missing required error field';
+                }
+                if (!response.hasOwnProperty('result')) {
+                    throw 'response is missing required result field';
+                }
+                if (response.error) {
+                    throw response.error;
+                }
+                resolve(response.result);
+            } catch (e) {
+                reject(e);
+            }
+        });
+
+        xhr.open('POST', 'http://127.0.0.1:8765');
+        xhr.send(JSON.stringify({action, version, params}));
+    });
+}
 
 var pair = languagePair.get('pair');
 if (pair) {
@@ -43,7 +81,7 @@ if (pair) {
             to: 'en',
             domain: g_config.domain,
             client: 'gtx',
-			agent: g_config.agent
+            agent: g_config.agent
         })
         .then(function (res) {
             var detect = res.from.language.iso;
@@ -103,7 +141,7 @@ function doTranslate(opts) {
             to: opts.to.language,
             domain: g_config.domain,
             client: 'gtx',
-     		agent: g_config.agent
+            agent: g_config.agent
         })
         .then(function (res) {
             var items = [];
@@ -151,20 +189,55 @@ function doTranslate(opts) {
                 var toPhonetic = res.to.text.phonetic;
                 var toText = res.to.text.value;
                 var toArg = g_config.voice === 'remote' ? opts.to.ttsfile : g_config.voice === 'local' ? toText : '';
-                // Translation
-                items.push({
-                    title: toText,
-                    subtitle: `Phonetic: ${toPhonetic}`,
-                    quicklookurl: `${g_config.domain}/#view=home&op=translate&sl=${opts.to.language}&tl=${opts.from.language}&text=${encodeURIComponent(toText)}`,
-                    arg: toArg,
-                    text: {
-                        copy: toText,
-                        largetype: toText
-                    },
-                    icon: {
-                        path: g_config.voice === 'none' ? 'icon.png' : 'tts.png'
+
+                // anki show
+                var step = 25;
+                if (null != toText && toText.length > step) {
+                    var l = toText.length / step;
+                    var start = 0;
+                    for (var i = 0; i < l; i++) {
+                        var end = start + step;
+                        var eachToText = '';
+                        if (end < toText.length) {
+                            eachToText = toText.substring(start, end);
+                            start = end;
+                        }
+                        else {
+                            end = toText.length - 1;
+                            eachToText = toText.substring(start, end);
+                        }
+                        // Translation
+                        items.push({
+                            title: eachToText,
+                            subtitle: `Phonetic: ${toPhonetic}`,
+                            quicklookurl: `${g_config.domain}/#view=home&op=translate&sl=${opts.to.language}&tl=${opts.from.language}&text=${encodeURIComponent(toText)}`,
+                            arg: toArg,
+                            text: {
+                                copy: eachToText,
+                                largetype: eachToText
+                            },
+                            icon: {
+                                path: g_config.voice === 'none' ? 'icon.png' : 'tts.png'
+                            }
+                        });
                     }
-                });
+                }
+                else {
+                    // Translation
+                    items.push({
+                        title: toText,
+                        subtitle: `Phonetic: ${toPhonetic}`,
+                        quicklookurl: `${g_config.domain}/#view=home&op=translate&sl=${opts.to.language}&tl=${opts.from.language}&text=${encodeURIComponent(toText)}`,
+                        arg: toArg,
+                        text: {
+                            copy: toText,
+                            largetype: toText
+                        },
+                        icon: {
+                            path: g_config.voice === 'none' ? 'icon.png' : 'tts.png'
+                        }
+                    });
+                }
 
                 // Definitions
                 res.to.definitions.forEach(definition => {
@@ -192,6 +265,61 @@ function doTranslate(opts) {
             }
 
             alfy.output(items);
+
+            // save anki.
+            if (null != items && items.length > 0) {
+                try {
+                    fromTextGlobal = JSON.stringify(items[0].title);
+                    fromTextGlobal = replace8Str(fromTextGlobal);
+
+                    toTextGlobal = "<div>" + items[1].title + "</div></br>";
+                    for (var i = 2; i < items.length; i++) {
+                        toTextGlobal += "<div>" + items[i].title + "<div>";
+                        var subTitle = "<div>" + items[i].subtitle + "<div></br>";
+                        // replace redundant str.
+                        var synonymsIndex = subTitle.indexOf("Synonyms");
+                        if (synonymsIndex > 0) {
+                            subTitle = subTitle.substr(synonymsIndex + 9);
+                        }
+                        toTextGlobal += subTitle;
+                    }
+                    toTextGlobal = replace8Str(toTextGlobal);
+                } catch (e) {
+                    /*
+                     * handler this case.
+                     * "items": [{
+                     *               "title": "为什么TC在脏写之后尝试无限回滚分支事务？",
+                     *               "subtitle": "Show translation for Why does TC try to rollback branch transaction infinitely after a dirty write??",
+                     *               "autocomplete": "Why does TC try to rollback branch transaction infinitely after a dirty write?"
+                     *          }]
+                     *
+                     */
+                    fromTextGlobal = JSON.stringify(items[0].autocomplete);
+                    toTextGlobal = "<div>" + items[0].title + "</div></br>";
+                }
+
+                // anki
+                invokeAnki('createDeck', 6, {
+                    "deck": deckName
+                });
+                invokeAnki('addNote', 6, {
+                    "note": {
+                        "deckName": deckName,
+                        "modelName": "Basic",
+                        "fields": {
+                            "Front": "" + fromTextGlobal,
+                            "Back": "" + toTextGlobal + ""
+                        },
+                        "options": {
+                            "allowDuplicate": true,
+                        },
+                        "tags": [
+                            "glossary"
+                        ]
+                    }
+                });
+
+            }
 
             res.from.language.ttsfile = opts.from.ttsfile;
             res.to.language = {iso: opts.to.language, ttsfile: opts.to.ttsfile};
@@ -223,7 +351,7 @@ function doTranslate(opts) {
                     domain: g_config.domain,
                     file: res.from.language.ttsfile,
                     client: 'gtx',
-					agent: g_config.agent
+                    agent: g_config.agent
                 });
                 var toArray = [];
                 res.to.text.array.forEach(o => tts.split(o).forEach(t => toArray.push(t)));
@@ -232,9 +360,47 @@ function doTranslate(opts) {
                     domain: g_config.domain,
                     file: res.to.language.ttsfile,
                     client: 'gtx',
-					agent: g_config.agent
+                    agent: g_config.agent
                 });
             }
         })
     ;
+}
+
+// anki
+function acquireCurrentDate() {
+    // 获取当前日期
+    var date = new Date();
+
+    // 获取当前月份
+    var nowMonth = date.getMonth() + 1;
+
+    // 获取当前是几号
+    var strDate = date.getDate();
+
+    // 添加分隔符“-”
+    var seperator = "-";
+
+    // 对月份进行处理，1-9月在前面添加一个“0”
+    if (nowMonth >= 1 && nowMonth <= 9) {
+        nowMonth = "0" + nowMonth;
+    }
+
+    // 对月份进行处理，1-9号在前面添加一个“0”
+    if (strDate >= 0 && strDate <= 9) {
+        strDate = "0" + strDate;
+    }
+
+    // 最后拼接字符串，得到一个格式为(yyyy-MM-dd)的日期
+    var nowDate = date.getFullYear() + seperator + nowMonth + seperator + strDate;
+
+    return nowDate;
+}
+
+/**
+ * anki
+ * remove * in str
+ */
+function replace8Str(str) {
+    return str.replace("*", "");
 }
